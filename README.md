@@ -154,6 +154,14 @@ Custom Assets Tools:
 
 - [78/xiaozhi-assets-generator](https://github.com/78/xiaozhi-assets-generator) Custom Assets Generator (Wake words, fonts, emojis, backgrounds)
 
+## Custom Build - Goouuu ESP32-S3 V2 Customization
+
+This repository contains customization for the **Goouuu ESP32-S3 V2** board:
+- Smaller font layout (`14px`) to fit 128x160 TFT screens.
+- Dual display setup: Primary 1.8" SPI TFT screen for subtitles and status, Secondary 1.3" I2C OLED screen (SDA=GPIO 2, SCL=GPIO 1) for animated Emo eyes.
+- Battery monitoring on GPIO 10.
+- Automatic screen dimming (after 3 minutes) and deep sleep shutdown (after 6 minutes) when running on battery.
+
 ## About the Project
 
 This is an open-source ESP32 project, released under the MIT license, allowing anyone to use it for free, including for commercial purposes.

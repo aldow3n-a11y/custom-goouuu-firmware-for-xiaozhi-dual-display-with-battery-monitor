@@ -17,6 +17,7 @@
 #include <font_awesome.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <ctime>
 
 #include <esp_log.h>
@@ -68,15 +69,15 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 
 #define TAG "CompactWifiBoardLCD"
 
-// Background gradient colors (RGB565)
-static const lv_color16_t kIdleBgColors[] = {
-    lv_color_hex(0x1a1a2e),  // Deep navy
-    lv_color_hex(0x16213e),  // Dark blue
-    lv_color_hex(0x0f3460),  // Midnight blue
-    lv_color_hex(0x1b1b2f),  // Dark indigo
-    lv_color_hex(0x162447),  // Deep ocean
+// Idle background: animated starfield
+static constexpr int kStarCount = 20;
+static constexpr int kStarMaxSpeed = 2;
+
+struct Star {
+    int16_t x, y;
+    int8_t speed;
+    uint8_t brightness;
 };
-static const int kIdleBgColorCount = sizeof(kIdleBgColors) / sizeof(kIdleBgColors[0]);
 
 class CompactWifiBoardLCD;
 
@@ -84,30 +85,65 @@ class TftDisplay : public SpiLcdDisplay {
 private:
     PowerSaveTimer* power_save_timer_ = nullptr;
     lv_obj_t* battery_pct_label_ = nullptr;
-    lv_obj_t* bg_panel_ = nullptr;
-    int bg_color_index_ = 0;
+    lv_obj_t* bg_canvas_ = nullptr;
+    lv_timer_t* anim_timer_ = nullptr;
+    Star stars_[kStarCount];
+    lv_color16_t* canvas_buf_ = nullptr;
     CompactWifiBoardLCD* board_ = nullptr;
 
-    void ApplyGradientBackground() {
-        if (bg_panel_ == nullptr) return;
-        lv_color_t top = kIdleBgColors[bg_color_index_];
-        lv_color_t bottom = lv_color_hex(0x0a0a1a);
-
-        lv_obj_set_style_bg_color(bg_panel_, top, 0);
-        lv_gradient_t grad;
-        grad.dir = LV_GRAD_DIR_VER;
-        grad.stops[0].color = top;
-        grad.stops[0].opa = LV_OPA_COVER;
-        grad.stops[0].frac = 0;
-        grad.stops[1].color = bottom;
-        grad.stops[1].opa = LV_OPA_COVER;
-        grad.stops[1].frac = 255;
-        lv_obj_set_style_bg_grad(bg_panel_, grad, 0);
+    void InitStars() {
+        srand((unsigned)time(NULL));
+        for (int i = 0; i < kStarCount; i++) {
+            stars_[i].x = rand() % DISPLAY_WIDTH;
+            stars_[i].y = rand() % DISPLAY_HEIGHT;
+            stars_[i].speed = 1 + rand() % kStarMaxSpeed;
+            stars_[i].brightness = 80 + rand() % 176;
+        }
     }
 
-    void CycleBackground() {
-        bg_color_index_ = (bg_color_index_ + 1) % kIdleBgColorCount;
-        ApplyGradientBackground();
+    void DrawStars() {
+        if (canvas_buf_ == nullptr) return;
+        // Clear with dark gradient
+        for (int y = 0; y < DISPLAY_HEIGHT; y++) {
+            uint8_t ratio = (uint8_t)(y * 200 / DISPLAY_HEIGHT);
+            uint8_t r = 6 + ratio / 16;
+            uint8_t g = 6 + ratio / 20;
+            uint8_t b = 18 + ratio / 8;
+            lv_color16_t c = lv_color_make(r, g, b);
+            for (int x = 0; x < DISPLAY_WIDTH; x++) {
+                canvas_buf_[y * DISPLAY_WIDTH + x] = c;
+            }
+        }
+        // Draw stars
+        for (int i = 0; i < kStarCount; i++) {
+            Star& s = stars_[i];
+            uint8_t bri = s.brightness;
+            lv_color16_t star_color = lv_color_make(bri, bri, bri);
+            if (s.x >= 0 && s.x < DISPLAY_WIDTH && s.y >= 0 && s.y < DISPLAY_HEIGHT) {
+                canvas_buf_[s.y * DISPLAY_WIDTH + s.x] = star_color;
+            }
+        }
+    }
+
+    void AnimateStars() {
+        for (int i = 0; i < kStarCount; i++) {
+            stars_[i].y += stars_[i].speed;
+            if (stars_[i].y >= DISPLAY_HEIGHT) {
+                stars_[i].y = 0;
+                stars_[i].x = rand() % DISPLAY_WIDTH;
+                stars_[i].speed = 1 + rand() % kStarMaxSpeed;
+                stars_[i].brightness = 80 + rand() % 176;
+            }
+        }
+        DrawStars();
+        if (bg_canvas_ != nullptr) {
+            lv_obj_invalidate(bg_canvas_);
+        }
+    }
+
+    static void AnimTimerCb(lv_timer_t* timer) {
+        TftDisplay* self = (TftDisplay*)timer->user_data;
+        self->AnimateStars();
     }
 
 public:
@@ -137,16 +173,25 @@ public:
         lv_obj_set_style_text_font(screen, text_font, 0);
         lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
 
-        // Full-screen gradient background panel
-        bg_panel_ = lv_obj_create(screen);
-        lv_obj_set_size(bg_panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        lv_obj_align(bg_panel_, LV_ALIGN_TOP_LEFT, 0, 0);
-        lv_obj_set_style_border_width(bg_panel_, 0, 0);
-        lv_obj_set_style_pad_all(bg_panel_, 0, 0);
-        lv_obj_set_style_radius(bg_panel_, 0, 0);
-        lv_obj_set_scrollbar_mode(bg_panel_, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_move_background(bg_panel_);
-        ApplyGradientBackground();
+        // Animated starfield background
+        canvas_buf_ = (lv_color16_t*)heap_caps_malloc(
+            DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color16_t), MALLOC_CAP_SPIRAM);
+        if (canvas_buf_ != nullptr) {
+            InitStars();
+            DrawStars();
+
+            lv_draw_buf_t draw_buf;
+            lv_draw_buf_init(&draw_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_COLOR_FORMAT_RGB565,
+                             LV_STRIDE_AUTO, canvas_buf_, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color16_t));
+
+            bg_canvas_ = lv_canvas_create(screen);
+            lv_canvas_set_draw_buf(bg_canvas_, &draw_buf);
+            lv_obj_set_size(bg_canvas_, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+            lv_obj_align(bg_canvas_, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_move_background(bg_canvas_);
+
+            anim_timer_ = lv_timer_create(AnimTimerCb, 80, this);
+        }
 
         // ----- Top bar: [WiFi] [status scrolling] [%] -----
         top_bar_ = lv_obj_create(screen);
@@ -256,12 +301,6 @@ public:
                     lv_label_set_text(status_label_, status.c_str());
                 }
             }
-            // Cycle background color every 5 minutes
-            static int last_bg_cycle = -1;
-            if (tm->tm_min % 5 == 0 && tm->tm_min != last_bg_cycle) {
-                last_bg_cycle = tm->tm_min;
-                CycleBackground();
-            }
         }
 
         // Update battery percentage
@@ -317,8 +356,11 @@ public:
             power_save_timer_->WakeUp();
         }
         SpiLcdDisplay::SetTheme(theme);
-        // Redraw gradient background with new theme colors
-        ApplyGradientBackground();
+        // Redraw starfield with new theme
+        DrawStars();
+        if (bg_canvas_ != nullptr) {
+            lv_obj_invalidate(bg_canvas_);
+        }
     }
 
     virtual void SetChatMessage(const char* role, const char* content) override {

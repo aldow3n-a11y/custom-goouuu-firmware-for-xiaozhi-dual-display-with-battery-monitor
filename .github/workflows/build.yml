@@ -39,9 +39,10 @@ jobs:
         run: |
           EVENT_NAME="${{ github.event_name }}"
 
-          # push 到 main 分支，编译全部变体
+          # push 到 main 分支，只编译目标板子
           if [[ "$EVENT_NAME" == "push" ]]; then
-            echo "variants=$ALL_VARIANTS" >> $GITHUB_OUTPUT
+            FILTERED=$(echo "$ALL_VARIANTS" | jq -c 'map(select(.board == "bread-compact-wifi-lcd"))')
+            echo "variants=$FILTERED" >> $GITHUB_OUTPUT
             exit 0
           fi
 

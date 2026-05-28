@@ -286,4 +286,9 @@
 // A MCP Test: Control a lamp
 #define LAMP_GPIO GPIO_NUM_18
 
+#define OLED_I2C_SDA_PIN GPIO_NUM_2
+#define OLED_I2C_SCL_PIN GPIO_NUM_1
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+
 #endif // _BOARD_CONFIG_H_

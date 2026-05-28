@@ -1,0 +1,13 @@
+{
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "bread-compact-wifi-lcd",
+            "sdkconfig_append": [
+                "CONFIG_LCD_ST7735_128X160=y",
+                "CONFIG_OLED_SH1106_128X64=y",
+                "CONFIG_FLASH_EXPRESSION_ASSETS=y"
+            ]
+        }
+    ]
+}

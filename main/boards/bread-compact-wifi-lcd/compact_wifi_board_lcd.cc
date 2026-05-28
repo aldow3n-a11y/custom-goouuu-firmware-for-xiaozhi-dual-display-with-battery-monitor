@@ -442,7 +442,8 @@ private:
         });
         power_save_timer_->OnShutdownRequest([this]() {
             ESP_LOGI(TAG, "Shutdown timeout reached. Entering deep sleep...");
-            esp_sleep_enable_gpio_wakeup(1ULL << BOOT_BUTTON_GPIO, GPIO_INTR_LOW_LEVEL);
+            gpio_wakeup_enable(BOOT_BUTTON_GPIO, GPIO_INTR_LOW_LEVEL);
+            esp_sleep_enable_gpio_wakeup();
             esp_deep_sleep_start();
         });
         power_save_timer_->SetEnabled(false); // Enable dynamically on battery in GetBatteryLevel

@@ -11,7 +11,8 @@
 #include "display/emote_display.h"
 #include "boards/common/adc_battery_monitor.h"
 #include "boards/common/power_save_timer.h"
-#include "display/lvgl_display/lvgl_theme.h"
+#include "lvgl_theme.h"
+#include "board.h"
 
 #include <font_awesome.h>
 #include <cstdio>

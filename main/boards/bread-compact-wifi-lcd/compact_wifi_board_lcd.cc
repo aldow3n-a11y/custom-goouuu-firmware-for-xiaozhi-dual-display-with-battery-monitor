@@ -11,6 +11,10 @@
 #include "display/emote_display.h"
 #include "boards/common/adc_battery_monitor.h"
 #include "boards/common/power_save_timer.h"
+#include "display/lvgl_display/lvgl_theme.h"
+
+#include <font_awesome.h>
+#include <cstdio>
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -73,6 +77,8 @@ private:
     emote::EmoteDisplay* oled_;
     esp_lcd_panel_handle_t oled_panel_;
     PowerSaveTimer* power_save_timer_ = nullptr;
+    lv_obj_t* battery_pct_label_ = nullptr;  // Numeric battery percentage label
+
 public:
     DualDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
                 int width, int height, int offset_x, int offset_y,
@@ -83,6 +89,164 @@ public:
 
     void SetPowerSaveTimer(PowerSaveTimer* timer) {
         power_save_timer_ = timer;
+    }
+
+    // -----------------------------------------------------------------------
+    // Custom SetupUI: TFT shows top bar (WiFi | time | battery%) + full-area
+    // chat messages.  The face/emotion lives on the OLED so we skip emoji_box_.
+    // -----------------------------------------------------------------------
+    virtual void SetupUI() override {
+        if (setup_ui_called_) return;
+        Display::SetupUI();
+        DisplayLockGuard lock(this);
+
+        LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        auto text_font  = lvgl_theme->text_font()->font();
+        auto icon_font  = lvgl_theme->icon_font()->font();
+
+        auto screen = lv_screen_active();
+        lv_obj_set_style_text_font(screen, text_font, 0);
+        lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
+        lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
+
+        // ----- Top bar: [WiFi] [time (center)] [🔋 XX%] -----
+        top_bar_ = lv_obj_create(screen);
+        lv_obj_set_size(top_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(top_bar_, 0, 0);
+        lv_obj_set_style_bg_color(top_bar_, lvgl_theme->background_color(), 0);
+        lv_obj_set_style_bg_opa(top_bar_, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(top_bar_, 0, 0);
+        lv_obj_set_style_pad_all(top_bar_, 0, 0);
+        lv_obj_set_style_pad_top(top_bar_, lvgl_theme->spacing(2), 0);
+        lv_obj_set_style_pad_bottom(top_bar_, lvgl_theme->spacing(2), 0);
+        lv_obj_set_style_pad_left(top_bar_, lvgl_theme->spacing(3), 0);
+        lv_obj_set_style_pad_right(top_bar_, lvgl_theme->spacing(3), 0);
+        lv_obj_set_flex_flow(top_bar_, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_scrollbar_mode(top_bar_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
+
+        // Left: WiFi icon
+        network_label_ = lv_label_create(top_bar_);
+        lv_label_set_text(network_label_, "");
+        lv_obj_set_style_text_font(network_label_, icon_font, 0);
+        lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+
+        // Center: rolling time / status  (status_bar_ overlays top_bar_)
+        // We create status_bar_ as an absolute overlay so the text is centred.
+        status_bar_ = lv_obj_create(screen);
+        lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(status_bar_, 0, 0);
+        lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(status_bar_, 0, 0);
+        lv_obj_set_style_pad_all(status_bar_, 0, 0);
+        lv_obj_set_style_pad_top(status_bar_, lvgl_theme->spacing(2), 0);
+        lv_obj_set_style_pad_bottom(status_bar_, lvgl_theme->spacing(2), 0);
+        lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
+        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);
+
+        notification_label_ = lv_label_create(status_bar_);
+        lv_obj_set_width(notification_label_, LV_HOR_RES * 55 / 100);
+        lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
+        lv_label_set_text(notification_label_, "");
+        lv_obj_align(notification_label_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+
+        status_label_ = lv_label_create(status_bar_);
+        lv_obj_set_width(status_label_, LV_HOR_RES * 55 / 100);
+        lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+        lv_label_set_text(status_label_, "--:--");
+        lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
+
+        // Right: battery icon + numeric percentage
+        lv_obj_t* batt_box = lv_obj_create(top_bar_);
+        lv_obj_set_size(batt_box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(batt_box, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(batt_box, 0, 0);
+        lv_obj_set_style_pad_all(batt_box, 0, 0);
+        lv_obj_set_flex_flow(batt_box, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(batt_box, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(batt_box, lvgl_theme->spacing(1), 0);
+
+        battery_label_ = lv_label_create(batt_box);
+        lv_label_set_text(battery_label_, FONT_AWESOME_BATTERY_FULL);
+        lv_obj_set_style_text_font(battery_label_, icon_font, 0);
+        lv_obj_set_style_text_color(battery_label_, lvgl_theme->text_color(), 0);
+
+        battery_pct_label_ = lv_label_create(batt_box);
+        lv_label_set_text(battery_pct_label_, "--%");
+        lv_obj_set_style_text_font(battery_pct_label_, text_font, 0);
+        lv_obj_set_style_text_color(battery_pct_label_, lvgl_theme->text_color(), 0);
+
+        // ----- Content: full-area scrolling chat (no face/emoji on TFT) -----
+        // Calculate top_bar height after layout
+        lv_obj_update_layout(top_bar_);
+        lv_coord_t bar_h = lv_obj_get_height(top_bar_);
+
+        bottom_bar_ = lv_obj_create(screen);
+        lv_obj_set_size(bottom_bar_, LV_HOR_RES, LV_VER_RES - bar_h);
+        lv_obj_set_style_radius(bottom_bar_, 0, 0);
+        lv_obj_set_style_bg_color(bottom_bar_, lvgl_theme->background_color(), 0);
+        lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(bottom_bar_, lvgl_theme->text_color(), 0);
+        lv_obj_set_style_pad_all(bottom_bar_, lvgl_theme->spacing(3), 0);
+        lv_obj_set_style_border_width(bottom_bar_, 0, 0);
+        lv_obj_set_scrollbar_mode(bottom_bar_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_align(bottom_bar_, LV_ALIGN_TOP_MID, 0, bar_h);
+
+        chat_message_label_ = lv_label_create(bottom_bar_);
+        lv_label_set_text(chat_message_label_, "");
+        lv_obj_set_width(chat_message_label_, LV_HOR_RES - lvgl_theme->spacing(6));
+        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(chat_message_label_, lvgl_theme->text_color(), 0);
+        lv_obj_align(chat_message_label_, LV_ALIGN_TOP_MID, 0, 0);
+
+        // Low battery popup
+        low_battery_popup_ = lv_obj_create(screen);
+        lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 9 / 10, text_font->line_height * 2);
+        lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -lvgl_theme->spacing(4));
+        lv_obj_set_style_bg_color(low_battery_popup_, lvgl_theme->low_battery_color(), 0);
+        lv_obj_set_style_radius(low_battery_popup_, lvgl_theme->spacing(4), 0);
+        low_battery_label_ = lv_label_create(low_battery_popup_);
+        lv_label_set_text(low_battery_label_, "Low Battery");
+        lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
+        lv_obj_center(low_battery_label_);
+        lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // -----------------------------------------------------------------------
+    // UpdateStatusBar: forward to base (WiFi + network + time), then update
+    // the numeric battery percentage on this display and relay to OLED.
+    // -----------------------------------------------------------------------
+    virtual void UpdateStatusBar(bool update_all = false) override {
+        SpiLcdDisplay::UpdateStatusBar(update_all);
+
+        // Update numeric battery percentage
+        if (battery_pct_label_ != nullptr) {
+            auto& board = Board::GetInstance();
+            int battery_level;
+            bool charging, discharging;
+            if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+                DisplayLockGuard lock(this);
+                char pct_str[8];
+                if (charging) {
+                    snprintf(pct_str, sizeof(pct_str), "+%d%%", battery_level);
+                } else {
+                    snprintf(pct_str, sizeof(pct_str), "%d%%", battery_level);
+                }
+                lv_label_set_text(battery_pct_label_, pct_str);
+            }
+        }
+
+        if (oled_ != nullptr) {
+            oled_->UpdateStatusBar(update_all);
+        }
     }
 
     virtual void SetStatus(const char* status) override {
@@ -119,7 +283,7 @@ public:
         if (power_save_timer_ != nullptr) {
             power_save_timer_->WakeUp();
         }
-        SpiLcdDisplay::SetEmotion(emotion);
+        // Don't set emotion on TFT — face lives on the OLED
         if (oled_ != nullptr) {
             oled_->SetEmotion(emotion);
         }
@@ -135,18 +299,16 @@ public:
         }
     }
 
-    virtual void UpdateStatusBar(bool update_all = false) override {
-        SpiLcdDisplay::UpdateStatusBar(update_all);
-        if (oled_ != nullptr) {
-            oled_->UpdateStatusBar(update_all);
-        }
-    }
-
     virtual void SetChatMessage(const char* role, const char* content) override {
         if (power_save_timer_ != nullptr) {
             power_save_timer_->WakeUp();
         }
-        SpiLcdDisplay::SetChatMessage(role, content);
+        // Update chat label directly on TFT (wrapping, full-area)
+        if (chat_message_label_ != nullptr) {
+            DisplayLockGuard lock(this);
+            lv_label_set_text(chat_message_label_, content);
+            lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        }
         if (oled_ != nullptr) {
             oled_->SetChatMessage(role, content);
         }
@@ -156,7 +318,10 @@ public:
         if (power_save_timer_ != nullptr) {
             power_save_timer_->WakeUp();
         }
-        SpiLcdDisplay::ClearChatMessages();
+        if (chat_message_label_ != nullptr) {
+            DisplayLockGuard lock(this);
+            lv_label_set_text(chat_message_label_, "");
+        }
         if (oled_ != nullptr) {
             oled_->ClearChatMessages();
         }

@@ -13,6 +13,7 @@
 #include "lvgl_theme.h"
 #include "board.h"
 #include "assets/lang_config.h"
+#include "display/lvgl_display/gif/lvgl_gif.h"
 
 #include <font_awesome.h>
 #include <cstdio>
@@ -69,15 +70,20 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 
 #define TAG "CompactWifiBoardLCD"
 
-// Idle background: animated starfield
-static constexpr int kStarCount = 20;
-static constexpr int kStarMaxSpeed = 2;
+#include "idle_animations/gif_data.h"
 
-struct Star {
-    int16_t x, y;
-    int8_t speed;
-    uint8_t brightness;
+struct GifBackground {
+    const char* name;
+    const uint8_t* data;
+    uint32_t size;
 };
+
+static const GifBackground kIdleGifs[] = {
+    {"starfield", starfield_gif, sizeof(starfield_gif)},
+    {"particles", particles_gif, sizeof(particles_gif)},
+    {"wave", wave_gif, sizeof(wave_gif)},
+};
+static constexpr int kIdleGifCount = sizeof(kIdleGifs) / sizeof(kIdleGifs[0]);
 
 class CompactWifiBoardLCD;
 
@@ -85,65 +91,42 @@ class TftDisplay : public SpiLcdDisplay {
 private:
     PowerSaveTimer* power_save_timer_ = nullptr;
     lv_obj_t* battery_pct_label_ = nullptr;
-    lv_obj_t* bg_canvas_ = nullptr;
-    lv_timer_t* anim_timer_ = nullptr;
-    Star stars_[kStarCount];
-    lv_color16_t* canvas_buf_ = nullptr;
+    lv_obj_t* gif_img_ = nullptr;
+    LvglGif* gif_controller_ = nullptr;
+    int current_gif_index_ = 0;
     CompactWifiBoardLCD* board_ = nullptr;
 
-    void InitStars() {
-        srand((unsigned)time(NULL));
-        for (int i = 0; i < kStarCount; i++) {
-            stars_[i].x = rand() % DISPLAY_WIDTH;
-            stars_[i].y = rand() % DISPLAY_HEIGHT;
-            stars_[i].speed = 1 + rand() % kStarMaxSpeed;
-            stars_[i].brightness = 80 + rand() % 176;
+    void LoadGif(int index) {
+        if (index < 0 || index >= kIdleGifCount) return;
+        if (gif_controller_ != nullptr) {
+            gif_controller_->Stop();
+            delete gif_controller_;
+            gif_controller_ = nullptr;
         }
-    }
+        if (gif_img_ != nullptr) {
+            lv_obj_del(gif_img_);
+            gif_img_ = nullptr;
+        }
 
-    void DrawStars() {
-        if (canvas_buf_ == nullptr) return;
-        // Clear with dark gradient
-        for (int y = 0; y < DISPLAY_HEIGHT; y++) {
-            uint8_t ratio = (uint8_t)(y * 200 / DISPLAY_HEIGHT);
-            uint8_t r = 6 + ratio / 16;
-            uint8_t g = 6 + ratio / 20;
-            uint8_t b = 18 + ratio / 8;
-            lv_color16_t c = lv_color_make(r, g, b);
-            for (int x = 0; x < DISPLAY_WIDTH; x++) {
-                canvas_buf_[y * DISPLAY_WIDTH + x] = c;
-            }
-        }
-        // Draw stars
-        for (int i = 0; i < kStarCount; i++) {
-            Star& s = stars_[i];
-            uint8_t bri = s.brightness;
-            lv_color16_t star_color = lv_color_make(bri, bri, bri);
-            if (s.x >= 0 && s.x < DISPLAY_WIDTH && s.y >= 0 && s.y < DISPLAY_HEIGHT) {
-                canvas_buf_[s.y * DISPLAY_WIDTH + s.x] = star_color;
-            }
-        }
-    }
+        current_gif_index_ = index;
+        const GifBackground& gif = kIdleGifs[index];
 
-    void AnimateStars() {
-        for (int i = 0; i < kStarCount; i++) {
-            stars_[i].y += stars_[i].speed;
-            if (stars_[i].y >= DISPLAY_HEIGHT) {
-                stars_[i].y = 0;
-                stars_[i].x = rand() % DISPLAY_WIDTH;
-                stars_[i].speed = 1 + rand() % kStarMaxSpeed;
-                stars_[i].brightness = 80 + rand() % 176;
-            }
-        }
-        DrawStars();
-        if (bg_canvas_ != nullptr) {
-            lv_obj_invalidate(bg_canvas_);
-        }
-    }
+        static lv_img_dsc_t img_dsc;
+        img_dsc.data = gif.data;
+        img_dsc.data_size = gif.size;
 
-    static void AnimTimerCb(lv_timer_t* timer) {
-        TftDisplay* self = (TftDisplay*)timer->user_data;
-        self->AnimateStars();
+        gif_controller_ = new LvglGif(&img_dsc);
+        if (gif_controller_->IsLoaded()) {
+            gif_img_ = lv_image_create(lv_screen_active());
+            lv_image_set_src(gif_img_, gif_controller_->image_dsc());
+            lv_obj_set_size(gif_img_, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+            lv_obj_align(gif_img_, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_move_background(gif_img_);
+            gif_controller_->Start();
+        } else {
+            delete gif_controller_;
+            gif_controller_ = nullptr;
+        }
     }
 
 public:
@@ -173,25 +156,8 @@ public:
         lv_obj_set_style_text_font(screen, text_font, 0);
         lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
 
-        // Animated starfield background
-        canvas_buf_ = (lv_color16_t*)heap_caps_malloc(
-            DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color16_t), MALLOC_CAP_SPIRAM);
-        if (canvas_buf_ != nullptr) {
-            InitStars();
-            DrawStars();
-
-            lv_draw_buf_t draw_buf;
-            lv_draw_buf_init(&draw_buf, DISPLAY_WIDTH, DISPLAY_HEIGHT, LV_COLOR_FORMAT_RGB565,
-                             LV_STRIDE_AUTO, canvas_buf_, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(lv_color16_t));
-
-            bg_canvas_ = lv_canvas_create(screen);
-            lv_canvas_set_draw_buf(bg_canvas_, &draw_buf);
-            lv_obj_set_size(bg_canvas_, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-            lv_obj_align(bg_canvas_, LV_ALIGN_TOP_LEFT, 0, 0);
-            lv_obj_move_background(bg_canvas_);
-
-            anim_timer_ = lv_timer_create(AnimTimerCb, 80, this);
-        }
+        // Load idle GIF background
+        LoadGif(0);
 
         // ----- Top bar: [WiFi] [status scrolling] [%] -----
         top_bar_ = lv_obj_create(screen);
@@ -216,7 +182,7 @@ public:
         lv_obj_set_style_text_font(network_label_, icon_font, 0);
         lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
 
-        // Center: status + time scrolling (no battery icon overlap)
+        // Center: status + time scrolling
         status_bar_ = lv_obj_create(screen);
         lv_obj_set_size(status_bar_, LV_HOR_RES - 40, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(status_bar_, 0, 0);
@@ -243,7 +209,7 @@ public:
         lv_label_set_text(status_label_, "--:--");
         lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
 
-        // Right: battery percentage only (no icon)
+        // Right: battery percentage only
         battery_pct_label_ = lv_label_create(top_bar_);
         lv_label_set_text(battery_pct_label_, "--%");
         lv_obj_set_style_text_font(battery_pct_label_, text_font, 0);
@@ -288,7 +254,6 @@ public:
     virtual void UpdateStatusBar(bool update_all = false) override {
         auto& app = Application::GetInstance();
 
-        // When idle: show "待命 HH:MM" combined as scrolling text
         if (app.GetDeviceState() == kDeviceStateIdle) {
             time_t now = time(NULL);
             struct tm* tm = localtime(&now);
@@ -303,7 +268,6 @@ public:
             }
         }
 
-        // Update battery percentage
         if (battery_pct_label_ != nullptr) {
             auto& board_ref = Board::GetInstance();
             int battery_level;
@@ -327,7 +291,6 @@ public:
         if (power_save_timer_ != nullptr) {
             power_save_timer_->WakeUp();
         }
-        // When listening/speaking, set status directly (overridden by UpdateStatusBar when idle)
         SpiLcdDisplay::SetStatus(status);
     }
 
@@ -356,11 +319,6 @@ public:
             power_save_timer_->WakeUp();
         }
         SpiLcdDisplay::SetTheme(theme);
-        // Redraw starfield with new theme
-        DrawStars();
-        if (bg_canvas_ != nullptr) {
-            lv_obj_invalidate(bg_canvas_);
-        }
     }
 
     virtual void SetChatMessage(const char* role, const char* content) override {

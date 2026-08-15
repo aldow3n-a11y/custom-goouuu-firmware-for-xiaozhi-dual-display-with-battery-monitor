@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Goouuu ESP32-S3 V2 — custom Xiaozhi firmware with dual display &amp; battery monitor</title>
+<meta name="description" content="Custom ESP32-S3 firmware for the Goouuu V2 dual-display Xiaozhi AI chatbot — TFT + OLED, ADC battery monitor, power saving, and animated idle backgrounds.">
+<style>
+  :root{
+    --bg:#0a0f0c;
+    --bg-2:#0d130f;
+    --surface:#10170f;
+    --surface-2:#152016;
+    --border:#1f2e22;
+    --ink:#e2ece4;
+    --muted:#8ba394;
+    --faint:#5a7262;
+    --accent:#4ade80;
+    --accent-soft:rgba(74,222,128,.12);
+    --accent-line:rgba(74,222,128,.32);
+    --warn:#fbbf24;
+    --mono:ui-monospace,"Cascadia Code","JetBrains Mono",Consolas,"SF Mono",Menlo,monospace;
+    --sans:"Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:var(--sans);line-height:1.6;
+    -webkit-font-smoothing:antialiased;overflow-x:hidden;
+  }
+  ::selection{background:var(--accent-soft);color:var(--accent)}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+
+  nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(10,15,12,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border);
+  }
+  .nav-inner{display:flex;align-items:center;justify-content:space-between;height:56px}
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:14px}
+  .dot{
+    width:9px;height:9px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 0 var(--accent-line);
+    animation:batPulse 2.2s ease-out infinite;
+  }
+  @keyframes batPulse{
+    0%{box-shadow:0 0 0 0 var(--accent-line)}
+    70%{box-shadow:0 0 0 10px rgba(74,222,128,0)}
+    100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}
+  }
+  .nav-links{display:flex;gap:22px;font-size:13.5px;color:var(--muted)}
+  .nav-links a{color:var(--muted)}
+  .nav-links a:hover{color:var(--ink);text-decoration:none}
+
+  header.hero{padding:88px 0 72px;position:relative}
+  .hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--accent);
+    border:1px solid var(--accent-line);border-radius:999px;
+    padding:5px 14px;background:var(--accent-soft);
+    animation:rise .5s .05s backwards;
+  }
+  h1{
+    font-size:clamp(30px,4.6vw,48px);line-height:1.12;letter-spacing:-.02em;
+    margin:22px 0 18px;font-weight:700;animation:rise .55s .15s backwards;
+  }
+  h1 .grad{
+    background:linear-gradient(120deg,var(--accent),#34d399 60%,#38bdf8);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .lede{color:var(--muted);font-size:17px;max-width:46ch;animation:rise .55s .28s backwards}
+  .lede code{font-family:var(--mono);font-size:.92em;color:var(--ink);background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
+  .cta-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:30px;animation:rise .55s .4s backwards}
+  .btn{
+    display:inline-flex;align-items:center;gap:9px;
+    font-family:var(--mono);font-size:14px;font-weight:600;
+    padding:12px 20px;border-radius:8px;min-height:44px;
+    transition:transform .15s ease,box-shadow .15s ease,background .15s ease;
+  }
+  .btn:hover{text-decoration:none;transform:translateY(-1px)}
+  .btn-primary{background:var(--accent);color:#0a1f12}
+  .btn-primary:hover{box-shadow:0 6px 24px rgba(74,222,128,.25)}
+  .btn-ghost{border:1px solid var(--border);color:var(--ink);background:var(--surface)}
+  .btn-ghost:hover{border-color:var(--accent-line);background:var(--surface-2)}
+  .btn .arr{transition:transform .15s ease}
+  .btn:hover .arr{transform:translateX(3px)}
+
+  /* ---------- device panel ---------- */
+  .device{
+    background:var(--surface);border:1px solid var(--border);border-radius:14px;
+    box-shadow:0 24px 60px rgba(0,0,0,.45);
+    overflow:hidden;animation:rise .6s .3s backwards;
+  }
+  .dev-bar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px;border-bottom:1px solid var(--border);
+    background:var(--surface-2);font-family:var(--mono);font-size:12px;color:var(--faint);
+  }
+  .dev-bar .live{display:flex;align-items:center;gap:7px;color:var(--accent)}
+  .dev-bar .live::before{
+    content:"";width:7px;height:7px;border-radius:50%;background:var(--accent);
+    animation:batPulse 2.2s ease-out infinite;
+  }
+  .dev-screen{
+    position:relative;margin:18px;border-radius:10px;overflow:hidden;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 0%, rgba(74,222,128,.08), transparent 60%),
+      #0c120e;
+    border:1px solid var(--border);
+    min-height:250px;
+  }
+  .dev-screen::after{ /* scan line */
+    content:"";position:absolute;left:0;right:0;height:70px;top:-70px;
+    background:linear-gradient(180deg,transparent,rgba(74,222,128,.07),transparent);
+    animation:scan 3.4s linear infinite;pointer-events:none;
+  }
+  @keyframes scan{to{transform:translateY(340px)}}
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:10px 14px;font-family:var(--mono);font-size:11px;color:var(--muted);
+    border-bottom:1px dashed var(--border);
+  }
+  .topbar .wifi{color:var(--accent)}
+  .topbar .time{color:var(--ink)}
+  .batt{
+    display:inline-flex;align-items:center;gap:6px;
+    border:1px solid var(--accent-line);border-radius:4px;
+    padding:2px 7px;color:var(--accent);background:var(--accent-soft);
+  }
+  .batt .bar{
+    width:26px;height:9px;border:1px solid var(--accent-line);border-radius:2px;
+    position:relative;overflow:hidden;
+  }
+  .batt .bar::after{
+    content:"";position:absolute;left:1px;top:1px;bottom:1px;width:78%;
+    background:var(--accent);border-radius:1px;
+    animation:charge 2.6s ease-in-out infinite;
+  }
+  @keyframes charge{0%,100%{width:78%}50%{width:92%}}
+  .chat{padding:16px 14px;font-family:var(--mono);font-size:12.5px;line-height:1.8}
+  .chat .msg{opacity:0;animation:slideIn .45s forwards}
+  .chat .u{color:var(--muted)}
+  .chat .a{color:var(--ink)}
+  .chat .a .who{color:var(--accent)}
+  .chat .sys{color:var(--faint)}
+  .c1{animation-delay:.6s}.c2{animation-delay:1.1s}.c3{animation-delay:1.6s}.c4{animation-delay:2.1s}
+  .cursor{
+    display:inline-block;width:8px;height:14px;background:var(--accent);
+    vertical-align:-2px;animation:blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink{50%{opacity:0}}
+  @keyframes slideIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+  @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
+  .dev-foot{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:10px 16px;border-top:1px solid var(--border);
+    font-family:var(--mono);font-size:11px;color:var(--faint);
+  }
+  .dev-foot .chips{display:flex;gap:8px}
+  .chip{
+    border:1px solid var(--border);border-radius:4px;padding:2px 8px;color:var(--muted);
+  }
+  .chip.on{color:var(--accent);border-color:var(--accent-line);background:var(--accent-soft)}
+
+  section{padding:72px 0;border-top:1px solid var(--border)}
+  .sec-head{margin-bottom:44px;animation:rise .5s backwards}
+  .sec-kicker{
+    font-family:var(--mono);font-size:12px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--accent);margin-bottom:10px;
+  }
+  h2{font-size:clamp(24px,3vw,32px);letter-spacing:-.015em;font-weight:700}
+  .sec-sub{color:var(--muted);max-width:60ch;margin-top:10px;font-size:15.5px}
+
+  /* features */
+  .feats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .feat{
+    background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    padding:22px;opacity:0;animation:rise .5s forwards;
+  }
+  .feat .f-id{font-family:var(--mono);font-size:11px;color:var(--faint);display:block;margin-bottom:10px}
+  .feat h3{font-size:15.5px;margin-bottom:6px}
+  .feat p{font-size:13px;color:var(--muted)}
+  .feat .tag{
+    display:inline-block;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--accent);
+    border:1px solid var(--accent-line);border-radius:4px;
+    padding:2px 8px;margin-top:10px;background:var(--accent-soft);
+  }
+  .f1{animation-delay:.1s}.f2{animation-delay:.2s}.f3{animation-delay:.3s}
+  .f4{animation-delay:.4s}.f5{animation-delay:.5s}.f6{animation-delay:.6s}
+
+  /* battery meter */
+  .meter-wrap{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:center}
+  .meter{
+    background:var(--surface);border:1px solid var(--border);border-radius:12px;
+    padding:28px;opacity:0;animation:rise .5s backwards;
+  }
+  .meter .m-label{
+    font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--faint);margin-bottom:18px;
+  }
+  .meter .pct{
+    font-family:var(--mono);font-size:44px;font-weight:700;color:var(--accent);
+    line-height:1;margin-bottom:16px;
+  }
+  .meter .pct small{font-size:20px;color:var(--muted)}
+  .meter .track{
+    height:12px;border-radius:6px;background:var(--surface-2);
+    border:1px solid var(--border);overflow:hidden;
+  }
+  .meter .fill{
+    height:100%;width:0;border-radius:6px;
+    background:linear-gradient(90deg,var(--accent),#34d399);
+    animation:fill 1.6s .4s cubic-bezier(.2,.8,.2,1) forwards;
+  }
+  @keyframes fill{to{width:78%}}
+  .meter .m-note{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:12px}
+  .meter .m-note b{color:var(--muted);font-weight:600}
+  .meter-rows{display:flex;flex-direction:column;gap:12px}
+  .m-row{
+    display:flex;align-items:center;gap:14px;
+    background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;opacity:0;animation:rise .5s forwards;
+  }
+  .m-row .m-ico{
+    flex:none;width:34px;height:34px;border-radius:8px;
+    background:var(--accent-soft);border:1px solid var(--accent-line);
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:14px;color:var(--accent);
+  }
+  .m-row h3{font-size:14px;margin-bottom:2px}
+  .m-row p{font-size:12.5px;color:var(--muted)}
+  .mr1{animation-delay:.15s}.mr2{animation-delay:.3s}.mr3{animation-delay:.45s}.mr4{animation-delay:.6s}
+
+  /* build */
+  .codeblock{
+    background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    overflow:hidden;opacity:0;animation:rise .5s forwards;
+  }
+  .codeblock .cb-head{
+    font-family:var(--mono);font-size:11.5px;color:var(--faint);
+    padding:9px 16px;border-bottom:1px solid var(--border);background:var(--surface-2);
+  }
+  .codeblock pre{
+    padding:16px 18px;font-family:var(--mono);font-size:13px;line-height:1.7;
+    overflow-x:auto;color:var(--ink);
+  }
+  .codeblock .c{color:var(--faint)}
+  .codeblock .k{color:var(--accent)}
+  .codeblock .s{color:var(--ok)}
+  .cb1{animation-delay:.1s}
+
+  footer{padding:56px 0 64px;border-top:1px solid var(--border)}
+  .foot-inner{display:flex;flex-wrap:wrap;gap:24px;align-items:center;justify-content:space-between}
+  .foot-note{color:var(--faint);font-size:13px;font-family:var(--mono)}
+  .foot-note a{color:var(--muted)}
+  .foot-note a:hover{color:var(--accent)}
+
+  @media (max-width:900px){
+    .hero-grid{grid-template-columns:1fr;gap:40px}
+    .feats{grid-template-columns:1fr 1fr}
+    .meter-wrap{grid-template-columns:1fr}
+    header.hero{padding:56px 0 48px}
+  }
+  @media (max-width:520px){
+    .feats{grid-template-columns:1fr}
+    .nav-links{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation:none!important;transition:none!important}
+    .chat .msg{opacity:1}
+    .meter .fill{width:78%}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-inner">
+    <div class="brand"><span class="dot"></span>goouuu<span style="color:var(--faint)">/esp32-s3-v2</span></div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#battery">Battery</a>
+      <a href="#build">Build</a>
+      <a href="https://github.com/aldow3n-a11y/custom-goouuu-firmware-for-xiaozhi-dual-display-with-battery-monitor">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">● ESP32-S3 · C++ · ESP-IDF</span>
+      <h1>Goouuu V2, <span class="grad">rebuilt for two screens and a battery you can trust.</span></h1>
+      <p class="lede">Custom Xiaozhi firmware for the Goouuu ESP32-S3 V2 dual-display chatbot — a TFT for chat, an OLED for the face, an ADC battery monitor, and power saving that actually saves.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/aldow3n-a11y/custom-goouuu-firmware-for-xiaozhi-dual-display-with-battery-monitor">View on GitHub <span class="arr">→</span></a>
+        <a class="btn btn-ghost" href="https://github.com/78/xiaozhi-esp32">Based on xiaozhi-esp32</a>
+      </div>
+    </div>
+
+    <div class="device" aria-label="Animated device screen showing WiFi, time, battery percentage, and chat">
+      <div class="dev-bar">
+        <span>goouuu-v2 · bread-compact-wifi-lcd</span>
+        <span class="live">live</span>
+      </div>
+      <div class="dev-screen">
+        <div class="topbar">
+          <span class="wifi">▂▄▆█ wifi</span>
+          <span class="time">14:32</span>
+          <span class="batt"><span class="bar"></span>78%</span>
+        </div>
+        <div class="chat">
+          <div class="msg c1 sys">▸ wake word detected</div>
+          <div class="msg c2 u">you: what's the battery at?</div>
+          <div class="msg c3 a"><span class="who">goouuu:</span> 78% — 3.9V, plenty for the day.</div>
+          <div class="msg c4 sys">▸ face on OLED · chat on TFT<span class="cursor"></span></div>
+        </div>
+      </div>
+      <div class="dev-foot">
+        <span>tft 128×160 · oled · adc battery</span>
+        <span class="chips"><span class="chip on">vol 38/39</span><span class="chip">idle gif</span></span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-kicker">01 · What's custom</div>
+      <h2>Built on xiaozhi-esp32, tuned for the Goouuu V2</h2>
+      <p class="sec-sub">A fork of the XiaoZhi AI voice assistant firmware, customized for the Goouuu ESP32-S3 V2 dual-display board.</p>
+    </div>
+    <div class="feats">
+      <div class="feat f1">
+        <span class="f-id">F·01</span>
+        <h3>Dual-display layout</h3>
+        <p>TFT carries the full-area chat; the OLED keeps the face. Each screen does what it does best.</p>
+        <span class="tag">TFT + OLED</span>
+      </div>
+      <div class="feat f2">
+        <span class="f-id">F·02</span>
+        <h3>Status top bar</h3>
+        <p>WiFi, time, and battery percentage pinned to the top of the TFT — glanceable, always visible.</p>
+        <span class="tag">LVGL</span>
+      </div>
+      <div class="feat f3">
+        <span class="f-id">F·03</span>
+        <h3>ADC battery monitor</h3>
+        <p>Real battery percentage from the ADC, with a low-battery popup when it's time to charge.</p>
+        <span class="tag">adc_battery_monitor</span>
+      </div>
+      <div class="feat f4">
+        <span class="f-id">F·04</span>
+        <h3>Power saving</h3>
+        <p>Idle states that draw less — the display rests when you're not talking to it.</p>
+        <span class="tag">power manager</span>
+      </div>
+      <div class="feat f5">
+        <span class="f-id">F·05</span>
+        <h3>Animated idle backgrounds</h3>
+        <p>Starfield, particles, and wave GIF backgrounds on the TFT while idle, via LvGif playback.</p>
+        <span class="tag">LvGif</span>
+      </div>
+      <div class="feat f6">
+        <span class="f-id">F·06</span>
+        <h3>Volume on GPIO 38/39</h3>
+        <p>Dedicated volume buttons wired to the board's real pins — no more menu diving.</p>
+        <span class="tag">GPIO 38/39</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="battery">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-kicker">02 · Battery monitor</div>
+      <h2>Know the charge, not just the guess</h2>
+      <p class="sec-sub">The ADC battery monitor feeds a live percentage into the top bar and raises a low-battery popup before the device gives up.</p>
+    </div>
+    <div class="meter-wrap">
+      <div class="meter">
+        <div class="m-label">battery · live readout</div>
+        <div class="pct">78<small>%</small></div>
+        <div class="track"><div class="fill"></div></div>
+        <div class="m-note">adc sample → <b>percentage</b> → top bar + popup</div>
+      </div>
+      <div class="meter-rows">
+        <div class="m-row mr1"><span class="m-ico">%</span><div><h3>Percentage in the top bar</h3><p>WiFi · time · battery, one glance.</p></div></div>
+        <div class="m-row mr2"><span class="m-ico">!</span><div><h3>Low-battery popup</h3><p>An LVGL popup appears before shutdown.</p></div></div>
+        <div class="m-row mr3"><span class="m-ico">▽</span><div><h3>Power-saving idle</h3><p>Display rests when idle; wake word stays armed.</p></div></div>
+        <div class="m-row mr4"><span class="m-ico">▮</span><div><h3>Board-level integration</h3><p>Wired through <code>adc_battery_monitor.h</code> in the board glue.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="build">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-kicker">03 · Build &amp; flash</div>
+      <h2>ESP-IDF, one board target</h2>
+      <p class="sec-sub">Standard ESP-IDF workflow — set the target, pick the board, build, flash.</p>
+    </div>
+    <div class="codeblock cb1">
+      <div class="cb-head">terminal — esp-idf ≥ 5.4</div>
+      <pre><span class="k">$</span> idf.py set-target esp32s3
+<span class="k">$</span> idf.py menuconfig
+<span class="c">  Xiaozhi Assistant → Board Type → bread-compact-wifi-lcd</span>
+<span class="k">$</span> idf.py build flash</pre>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-inner">
+    <div class="brand"><span class="dot"></span>goouuu<span style="color:var(--faint)">/esp32-s3-v2</span></div>
+    <div class="foot-note">
+      Fork of <a href="https://github.com/78/xiaozhi-esp32">xiaozhi-esp32</a> · <a href="https://github.com/aldow3n-a11y/custom-goouuu-firmware-for-xiaozhi-dual-display-with-battery-monitor">github.com/aldow3n-a11y/custom-goouuu-firmware-for-xiaozhi-dual-display-with-battery-monitor</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
